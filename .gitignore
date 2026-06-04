@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local parsed books (regenerated on Render)
+backend/data/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Local PDFs — don't commit big binaries
+*.pdf
+
+paginas-reader.html

@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: scrollread
+    runtime: python
+    region: frankfurt
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.0
+    # Persistent disk so your library survives restarts and deploys.
+    # Requires a paid plan (Starter $7/mo + $1/mo per GB).
+    disk:
+      name: data
+      mountPath: /opt/render/project/src/backend/data
+      sizeGB: 1

@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>ScrollRead</title>
+<style>
+  :root {
+    --bg: #0c0c0e;
+    --bg-elev: #16161a;
+    --bg-elev-2: #1f1f25;
+    --fg: #f2f2f2;
+    --muted: #8a8a92;
+    --border: #2a2a30;
+    --accent: #7aa2ff;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overscroll-behavior: none;
+  }
+  button {
+    font-family: inherit;
+    background: none; border: none; color: inherit; cursor: pointer;
+  }
+
+  /* ============ Library screen ============ */
+  #library {
+    min-height: 100dvh;
+    padding: 32px 20px 120px;
+    max-width: 720px;
+    margin: 0 auto;
+  }
+  #library.hidden { display: none; }
+  .lib-header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 24px;
+  }
+  .lib-header h1 { margin: 0; font-size: 28px; font-weight: 600; letter-spacing: -0.5px; }
+  .lib-header .sub { color: var(--muted); font-size: 13px; }
+
+  .book-list { display: flex; flex-direction: column; gap: 10px; }
+  .book-card {
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px 18px;
+    cursor: pointer;
+    transition: background 0.12s ease;
+  }
+  .book-card:hover { background: var(--bg-elev-2); }
+  .book-info { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .book-title {
+    font-size: 15px; font-weight: 500;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    max-width: 100%;
+  }
+  .book-meta { font-size: 12px; color: var(--muted); }
+  .book-progress {
+    width: 100%; height: 3px; background: var(--bg-elev-2);
+    border-radius: 2px; overflow: hidden; margin-top: 8px;
+  }
+  .book-progress-bar { height: 100%; background: var(--accent); }
+  .book-actions { display: flex; gap: 6px; flex-shrink: 0; margin-left: 12px; }
+  .icon-btn {
+    width: 32px; height: 32px; border-radius: 8px;
+    display: grid; place-items: center;
+    color: var(--muted);
+  }
+  .icon-btn:hover { background: var(--bg-elev-2); color: var(--fg); }
+
+  .empty {
+    text-align: center; color: var(--muted);
+    padding: 60px 20px;
+    border: 1.5px dashed var(--border);
+    border-radius: 16px;
+  }
+
+  .add-fab {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    background: var(--accent); color: #0c0c0e;
+    padding: 14px 26px; border-radius: 999px;
+    font-weight: 600; font-size: 14px;
+    box-shadow: 0 8px 24px rgba(122,162,255,0.3);
+    z-index: 20;
+  }
+  .add-fab input { display: none; }
+  #upload-status {
+    position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+    background: var(--bg-elev-2); padding: 8px 14px; border-radius: 999px;
+    font-size: 12px; color: var(--muted);
+    z-index: 20;
+  }
+  #upload-status.hidden { display: none; }
+
+  /* ============ Reader ============ */
+  #reader { display: none; }
+  #reader.active { display: block; }
+
+  #feed {
+    height: 100dvh;
+    overflow-y: scroll;
+    scroll-snap-type: y mandatory;
+    scroll-behavior: smooth;
+  }
+  .card {
+    height: 100dvh;
+    scroll-snap-align: start;
+    scroll-snap-stop: always;
+    display: flex; flex-direction: column;
+    justify-content: center;
+    padding: 56px 28px 96px;
+    position: relative;
+  }
+  .card .text {
+    font-family: 'Georgia', 'Iowan Old Style', 'Charter', serif;
+    font-size: clamp(20px, 2.6vw, 26px);
+    line-height: 1.55;
+    max-width: 640px;
+    margin: 0 auto;
+  }
+  .card.continuation .text::before {
+    content: "…"; color: var(--muted); margin-right: 6px;
+  }
+  .card.continuation .text::after {
+    content: "…"; color: var(--muted); margin-left: 6px;
+  }
+  .card.new-paragraph::before {
+    content: "";
+    position: absolute;
+    top: 32px; left: 50%; transform: translateX(-50%);
+    width: 32px; height: 2px; background: var(--border); border-radius: 2px;
+  }
+  .card.image .img-wrap {
+    max-width: min(680px, 100%);
+    max-height: 75dvh;
+    margin: 0 auto;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .card.image img {
+    max-width: 100%; max-height: 75dvh;
+    object-fit: contain;
+    border-radius: 8px;
+    background: var(--bg-elev);
+  }
+
+  /* Reader HUD */
+  .hud {
+    position: fixed; top: 0; left: 0; right: 0;
+    padding: 12px 16px;
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 12px; color: var(--muted);
+    pointer-events: none;
+    background: linear-gradient(to bottom, rgba(12,12,14,0.85), rgba(12,12,14,0));
+    z-index: 5;
+  }
+  .hud > * { pointer-events: auto; }
+  .progress-bar {
+    position: fixed; bottom: 0; left: 0; height: 2px;
+    background: var(--accent);
+    width: 0%;
+    transition: width 0.2s ease;
+    z-index: 5;
+  }
+  .menu-btn {
+    width: 36px; height: 36px; border-radius: 50%;
+    background: rgba(40,40,46,0.7);
+    display: grid; place-items: center;
+    color: var(--fg);
+    backdrop-filter: blur(8px);
+  }
+  .menu-btn svg { width: 18px; height: 18px; }
+  .hud-right {
+    display: flex; align-items: center; gap: 10px;
+    background: rgba(40,40,46,0.7);
+    padding: 6px 12px;
+    border-radius: 999px;
+    backdrop-filter: blur(8px);
+  }
+  .hud-back {
+    color: var(--fg);
+    font-size: 11px;
+  }
+
+  /* ============ Drawer (hamburger menu) ============ */
+  .drawer-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6);
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.2s ease;
+    z-index: 50;
+  }
+  .drawer-overlay.open { opacity: 1; pointer-events: auto; }
+  .drawer {
+    position: fixed; top: 0; left: 0; bottom: 0;
+    width: min(360px, 88vw);
+    background: var(--bg-elev);
+    border-right: 1px solid var(--border);
+    transform: translateX(-100%);
+    transition: transform 0.22s cubic-bezier(0.2, 0.7, 0.2, 1);
+    z-index: 51;
+    display: flex; flex-direction: column;
+  }
+  .drawer.open { transform: translateX(0); }
+  .drawer-header {
+    padding: 18px 20px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .drawer-title {
+    font-size: 16px; font-weight: 600;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .drawer-sub {
+    font-size: 12px; color: var(--muted); margin-top: 4px;
+  }
+  .drawer-list {
+    flex: 1; overflow-y: auto; padding: 8px 0;
+  }
+  .drawer-item {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 10px;
+    width: 100%; text-align: left;
+    padding: 11px 20px;
+    font-size: 14px;
+    border-left: 2px solid transparent;
+  }
+  .drawer-item:hover { background: var(--bg-elev-2); }
+  .drawer-item.active {
+    border-left-color: var(--accent);
+    background: var(--bg-elev-2);
+  }
+  .drawer-item.level-2 { padding-left: 36px; font-size: 13px; color: var(--muted); }
+  .drawer-item.level-3 { padding-left: 52px; font-size: 12px; color: var(--muted); }
+  .drawer-item .page-tag {
+    font-size: 11px; color: var(--muted);
+    flex-shrink: 0;
+  }
+  .drawer-footer {
+    padding: 12px 20px;
+    border-top: 1px solid var(--border);
+    font-size: 12px; color: var(--muted);
+  }
+  .drawer-back-btn {
+    width: 100%;
+    padding: 10px;
+    background: var(--bg-elev-2);
+    border-radius: 8px;
+    color: var(--fg);
+    font-size: 13px;
+  }
+</style>
+</head>
+<body>
+
+<!-- ============ Library ============ -->
+<div id="library">
+  <div class="lib-header">
+    <div>
+      <h1>ScrollRead</h1>
+      <div class="sub">Tu biblioteca</div>
+    </div>
+  </div>
+  <div id="book-list" class="book-list"></div>
+  <div id="empty" class="empty" style="display:none">
+    Aún no hay libros. Sube tu primer PDF abajo.
+  </div>
+</div>
+
+<label class="add-fab" id="add-fab">
+  + Añadir PDF
+  <input id="file-input" type="file" accept="application/pdf" />
+</label>
+<div id="upload-status" class="hidden"></div>
+
+<!-- ============ Reader ============ -->
+<div id="reader">
+  <div id="feed"></div>
+  <div class="hud">
+    <button class="menu-btn" id="menu-btn" aria-label="Menú">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+    </button>
+    <div class="hud-right">
+      <button class="hud-back" id="hud-back">← Biblioteca</button>
+      <span id="hud-loc">—</span>
+    </div>
+  </div>
+  <div class="progress-bar" id="progress"></div>
+</div>
+
+<!-- ============ Drawer ============ -->
+<div class="drawer-overlay" id="drawer-overlay"></div>
+<aside class="drawer" id="drawer">
+  <div class="drawer-header">
+    <div class="drawer-title" id="drawer-title">—</div>
+    <div class="drawer-sub" id="drawer-sub">—</div>
+  </div>
+  <div class="drawer-list" id="drawer-list"></div>
+  <div class="drawer-footer">
+    <button class="drawer-back-btn" id="drawer-back">← Volver a biblioteca</button>
+  </div>
+</aside>
+
+<script>
+// Same-origin in prod (Render); allow override for local dev where the
+// frontend is on :5173 and the backend on :8000.
+const API = (location.port === '5173') ? 'http://localhost:8000' : '';
+const STORAGE_KEY = 'scrollread:progress';   // { [bookId]: cardIndex }
+
+const $library = document.getElementById('library');
+const $reader = document.getElementById('reader');
+const $bookList = document.getElementById('book-list');
+const $empty = document.getElementById('empty');
+const $fileInput = document.getElementById('file-input');
+const $addFab = document.getElementById('add-fab');
+const $uploadStatus = document.getElementById('upload-status');
+const $feed = document.getElementById('feed');
+const $hudLoc = document.getElementById('hud-loc');
+const $hudBack = document.getElementById('hud-back');
+const $progress = document.getElementById('progress');
+const $menuBtn = document.getElementById('menu-btn');
+const $drawer = document.getElementById('drawer');
+const $drawerOverlay = document.getElementById('drawer-overlay');
+const $drawerTitle = document.getElementById('drawer-title');
+const $drawerSub = document.getElementById('drawer-sub');
+const $drawerList = document.getElementById('drawer-list');
+const $drawerBack = document.getElementById('drawer-back');
+
+const State = {
+  bookId: null,
+  book: null,       // full book data {id, filename, cards, chapters, page_count}
+  observer: null,
+  currentIndex: 0,
+};
+
+// ---------- Progress persistence ----------
+function loadProgress() {
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}; }
+  catch { return {}; }
+}
+function saveProgress(bookId, index) {
+  const p = loadProgress();
+  p[bookId] = index;
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(p));
+}
+
+// ---------- Library ----------
+async function refreshLibrary() {
+  const res = await fetch(`${API}/books`);
+  const data = await res.json();
+  renderLibrary(data.books || []);
+}
+
+function renderLibrary(books) {
+  $bookList.innerHTML = '';
+  $empty.style.display = books.length === 0 ? 'block' : 'none';
+  const progress = loadProgress();
+  for (const b of books) {
+    const pct = b.card_count ? Math.round(((progress[b.id] || 0) / b.card_count) * 100) : 0;
+    const card = document.createElement('div');
+    card.className = 'book-card';
+    card.innerHTML = `
+      <div class="book-info">
+        <div class="book-title"></div>
+        <div class="book-meta">${b.page_count} pp · ${b.card_count} tarjetas · ${pct}% leído</div>
+        <div class="book-progress"><div class="book-progress-bar" style="width:${pct}%"></div></div>
+      </div>
+      <div class="book-actions">
+        <button class="icon-btn" data-action="delete" title="Eliminar">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14"/></svg>
+        </button>
+      </div>
+    `;
+    card.querySelector('.book-title').textContent = b.filename;
+    card.addEventListener('click', (e) => {
+      if (e.target.closest('[data-action="delete"]')) return;
+      openBook(b.id);
+    });
+    card.querySelector('[data-action="delete"]').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!confirm(`¿Eliminar "${b.filename}"?`)) return;
+      await fetch(`${API}/books/${b.id}`, { method: 'DELETE' });
+      refreshLibrary();
+    });
+    $bookList.appendChild(card);
+  }
+}
+
+$fileInput.addEventListener('change', async (e) => {
+  const f = e.target.files?.[0];
+  if (!f) return;
+  $uploadStatus.textContent = `Parseando ${f.name}…`;
+  $uploadStatus.classList.remove('hidden');
+  const form = new FormData();
+  form.append('file', f);
+  try {
+    const res = await fetch(`${API}/parse`, { method: 'POST', body: form });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    $uploadStatus.textContent = data.reused ? 'Ya estaba en tu biblioteca.' : 'Listo.';
+    setTimeout(() => $uploadStatus.classList.add('hidden'), 1200);
+    await refreshLibrary();
+    openBook(data.id);
+  } catch (err) {
+    $uploadStatus.textContent = `Error: ${err.message}`;
+  } finally {
+    $fileInput.value = '';
+  }
+});
+
+// ---------- Reader ----------
+async function openBook(bookId) {
+  const res = await fetch(`${API}/books/${bookId}`);
+  if (!res.ok) { alert('No se pudo cargar el libro'); return; }
+  const book = await res.json();
+  State.bookId = bookId;
+  State.book = book;
+  $library.classList.add('hidden');
+  $addFab.style.display = 'none';
+  $reader.classList.add('active');
+  renderFeed();
+  renderDrawer();
+}
+
+function backToLibrary() {
+  $reader.classList.remove('active');
+  $library.classList.remove('hidden');
+  $addFab.style.display = 'inline-block';
+  closeDrawer();
+  if (State.observer) { State.observer.disconnect(); State.observer = null; }
+  State.bookId = null; State.book = null;
+  refreshLibrary();
+}
+
+$hudBack.addEventListener('click', backToLibrary);
+$drawerBack.addEventListener('click', backToLibrary);
+
+function imageUrl(card) {
+  return `${API}/static/books/${State.bookId}/${card.image_url}`;
+}
+
+function renderFeed() {
+  $feed.innerHTML = '';
+  const frag = document.createDocumentFragment();
+  for (const c of State.book.cards) {
+    const el = document.createElement('div');
+    el.className = 'card';
+    el.dataset.index = c.id;
+    el.dataset.page = c.page;
+    if (c.type === 'image') {
+      el.classList.add('image');
+      const wrap = document.createElement('div');
+      wrap.className = 'img-wrap';
+      const img = document.createElement('img');
+      img.loading = 'lazy';
+      img.src = imageUrl(c);
+      img.alt = `Imagen p.${c.page}`;
+      wrap.appendChild(img);
+      el.appendChild(wrap);
+    } else {
+      if (c.is_paragraph_start) el.classList.add('new-paragraph');
+      else el.classList.add('continuation');
+      const t = document.createElement('div');
+      t.className = 'text';
+      t.textContent = c.text;
+      el.appendChild(t);
+    }
+    frag.appendChild(el);
+  }
+  $feed.appendChild(frag);
+
+  // Restore scroll position.
+  const startIndex = loadProgress()[State.bookId] || 0;
+  requestAnimationFrame(() => {
+    const target = $feed.children[startIndex];
+    if (target) target.scrollIntoView({ behavior: 'instant', block: 'start' });
+    updateHud(startIndex);
+  });
+
+  // Track current card.
+  if (State.observer) State.observer.disconnect();
+  State.observer = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (e.isIntersecting && e.intersectionRatio > 0.6) {
+        const idx = parseInt(e.target.dataset.index, 10);
+        State.currentIndex = idx;
+        saveProgress(State.bookId, idx);
+        updateHud(idx);
+      }
+    }
+  }, { root: $feed, threshold: [0.6] });
+  for (const el of $feed.children) State.observer.observe(el);
+}
+
+function updateHud(idx) {
+  const card = State.book.cards[idx];
+  if (!card) return;
+  $hudLoc.textContent = `p. ${card.page} · ${idx + 1}/${State.book.cards.length}`;
+  $progress.style.width = `${((idx + 1) / State.book.cards.length) * 100}%`;
+  // highlight active drawer item
+  document.querySelectorAll('.drawer-item').forEach(el => {
+    const target = parseInt(el.dataset.cardIndex, 10);
+    const next = parseInt(el.dataset.nextCardIndex, 10);
+    el.classList.toggle('active', idx >= target && (isNaN(next) || idx < next));
+  });
+}
+
+// ---------- Drawer ----------
+function renderDrawer() {
+  $drawerTitle.textContent = State.book.filename;
+  const chCount = State.book.chapters.length;
+  $drawerSub.textContent = chCount ? `${chCount} secciones` : 'Sin índice detectado';
+  $drawerList.innerHTML = '';
+  State.book.chapters.forEach((ch, i) => {
+    const btn = document.createElement('button');
+    btn.className = `drawer-item level-${ch.level}`;
+    btn.dataset.cardIndex = ch.card_index;
+    const next = State.book.chapters[i + 1];
+    if (next) btn.dataset.nextCardIndex = next.card_index;
+    btn.innerHTML = `<span></span><span class="page-tag">p. ${ch.page}</span>`;
+    btn.querySelector('span').textContent = ch.title;
+    btn.addEventListener('click', () => {
+      const target = $feed.children[ch.card_index];
+      if (target) target.scrollIntoView({ behavior: 'instant', block: 'start' });
+      closeDrawer();
+    });
+    $drawerList.appendChild(btn);
+  });
+}
+
+function openDrawer() {
+  $drawer.classList.add('open');
+  $drawerOverlay.classList.add('open');
+}
+function closeDrawer() {
+  $drawer.classList.remove('open');
+  $drawerOverlay.classList.remove('open');
+}
+$menuBtn.addEventListener('click', openDrawer);
+$drawerOverlay.addEventListener('click', closeDrawer);
+
+// ---------- Boot ----------
+refreshLibrary();
+</script>
+</body>
+</html>
