@@ -21,6 +21,7 @@
     font-family: -apple-system, system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
     overscroll-behavior: none;
+    overflow-x: hidden;
   }
   button {
     font-family: inherit;
@@ -104,8 +105,11 @@
   #feed {
     height: 100dvh;
     overflow-y: scroll;
+    overflow-x: hidden;
     scroll-snap-type: y mandatory;
     scroll-behavior: smooth;
+    overscroll-behavior: contain;
+    touch-action: pan-y;
   }
   .card {
     height: 100dvh;
