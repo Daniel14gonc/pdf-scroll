@@ -317,6 +317,42 @@ def _detect_chapters_by_font(
 
 # ---------- pass 2: build paragraphs ----------
 
+def _body_x_bounds(lines: list[_Line]) -> tuple[float, float] | None:
+    """Estimate the main text column's left/right edges from multi-word lines.
+
+    Marginalia (glossary terms, side notes) tends to be 1-3 words and sits
+    outside this column; we use the bounds to filter them out.
+    """
+    multi = [L for L in lines if len(L.text.split()) >= 5]
+    if len(multi) < 3:
+        return None
+    lefts = sorted(L.x_start for L in multi)
+    rights = sorted(L.x_end for L in multi)
+    # Inner quartile-ish range — robust to a few outliers.
+    left = lefts[len(lefts) // 4]
+    right = rights[-(len(rights) // 4) - 1]
+    return left, right
+
+
+def _is_marginalia(L: _Line, bounds: tuple[float, float] | None) -> bool:
+    if bounds is None:
+        return False
+    body_left, body_right = bounds
+    margin = 30.0
+    short = len(L.text.split()) <= 3
+    too_far_left = L.x_start < body_left - margin
+    too_far_right = L.x_end > body_right + margin and L.x_start > body_left + margin
+    return short and (too_far_left or too_far_right)
+
+
+def _join_lines(lines: list[str]) -> str:
+    """Join lines preserving '\n' between them so the hyphenation regex
+    in _clean_text can repair line-break hyphenation ('histori-\ncal' →
+    'historical'). _clean_text then collapses remaining '\n' to spaces.
+    """
+    return "\n".join(lines)
+
+
 def _build_paragraphs(
     pages_lines: list[list[_Line]],
     running: set[str],
@@ -326,6 +362,7 @@ def _build_paragraphs(
     for idx, page in enumerate(pages_lines):
         if idx in toc_pages:
             continue
+        bounds = _body_x_bounds(page)
         kept: list[_Line] = []
         for L in page:
             key = re.sub(r"\s+", " ", L.text).strip().lower()
@@ -333,13 +370,11 @@ def _build_paragraphs(
                 continue
             if _looks_like_chrome(L.text.strip()):
                 continue
+            if _is_marginalia(L, bounds):
+                continue
             kept.append(L)
         if not kept:
             continue
-        # Each line as its own "paragraph" candidate is too granular;
-        # PyMuPDF's text "blocks" already grouped paragraph-like units.
-        # We rebuild paragraphs by detecting big y-gaps between consecutive
-        # lines on the same page.
         gaps: list[float] = []
         for k in range(1, len(kept)):
             g = kept[k].y - kept[k - 1].y
@@ -354,9 +389,8 @@ def _build_paragraphs(
                 gap = L.y - kept[k - 1].y
                 if med_gap > 0 and gap > med_gap * 1.6:
                     new_para = True
-                # Indent change is a weak signal — skip it for now.
             if new_para and cur_text:
-                text = _clean_text(" ".join(cur_text))
+                text = _clean_text(_join_lines(cur_text))
                 if text:
                     out.append(Paragraph(kind="text", text=text, page=kept[k - 1].page, y=cur_y or 0))
                 cur_text = []
@@ -365,7 +399,7 @@ def _build_paragraphs(
                 cur_y = L.y
             cur_text.append(L.text)
         if cur_text:
-            text = _clean_text(" ".join(cur_text))
+            text = _clean_text(_join_lines(cur_text))
             if text:
                 out.append(Paragraph(kind="text", text=text, page=kept[-1].page, y=cur_y or 0))
     return out
