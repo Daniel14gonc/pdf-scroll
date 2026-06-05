@@ -83,6 +83,13 @@ _TOC_HEADER = re.compile(
 
 _MIN_IMAGE_PIXELS = 100 * 100
 
+# Vector-figure detection thresholds.
+_VEC_MIN_STROKES = 4              # cluster needs at least this many drawings
+_VEC_MIN_AREA_FRAC = 0.018        # cluster bbox >= this fraction of page area
+_VEC_CLUSTER_GAP = 18.0           # vertical gap (units) that breaks clusters
+_VEC_RENDER_SCALE = 2.0           # rasterization scale (2 = "@2x")
+_VEC_PADDING = 6.0                # padding around bbox before rendering
+
 
 def _clean_text(text: str) -> str:
     text = _HYPHEN_BREAK.sub(r"\1\2", text)
@@ -103,6 +110,61 @@ def _looks_like_chrome(text: str) -> bool:
 
 # ---------- pass 1: raw extraction ----------
 
+def _detect_vector_regions(page: fitz.Page) -> list[tuple[float, float, float, float]]:
+    """Cluster vector drawings on a page; return bboxes of figure-sized clusters.
+
+    Many diagrams (and most math equations rendered as paths) come through
+    PyMuPDF as drawings, not images. We cluster nearby drawings by vertical
+    proximity and keep clusters that look substantial.
+    """
+    try:
+        drawings = page.get_drawings()
+    except Exception:
+        return []
+    if not drawings:
+        return []
+
+    page_area = page.rect.width * page.rect.height
+    rects: list[tuple[float, float, float, float]] = []
+    for d in drawings:
+        r = d.get("rect")
+        if r is None:
+            continue
+        w = r.x1 - r.x0
+        h = r.y1 - r.y0
+        if w * h < 16:  # skip rules, underlines, single ticks
+            continue
+        rects.append((r.x0, r.y0, r.x1, r.y1))
+
+    if not rects:
+        return []
+
+    # Cluster by vertical proximity: items within _VEC_CLUSTER_GAP go together.
+    rects.sort(key=lambda r: r[1])
+    clusters: list[list[tuple[float, float, float, float]]] = [[rects[0]]]
+    for r in rects[1:]:
+        last = clusters[-1]
+        prev_bottom = max(p[3] for p in last)
+        if r[1] - prev_bottom < _VEC_CLUSTER_GAP:
+            last.append(r)
+        else:
+            clusters.append([r])
+
+    out: list[tuple[float, float, float, float]] = []
+    for cluster in clusters:
+        if len(cluster) < _VEC_MIN_STROKES:
+            continue
+        x0 = min(r[0] for r in cluster)
+        y0 = min(r[1] for r in cluster)
+        x1 = max(r[2] for r in cluster)
+        y1 = max(r[3] for r in cluster)
+        area = (x1 - x0) * (y1 - y0)
+        if area < page_area * _VEC_MIN_AREA_FRAC:
+            continue
+        out.append((x0, y0, x1, y1))
+    return out
+
+
 def _walk_pages(doc: fitz.Document, image_out_dir: Path) -> tuple[
     list[list[_Line]],     # lines per page
     list[_ImageHit],       # all image hits
@@ -118,6 +180,7 @@ def _walk_pages(doc: fitz.Document, image_out_dir: Path) -> tuple[
         page_num = page_idx + 1
         d = page.get_text("dict")
         page_lines: list[_Line] = []
+        page_image_bboxes: list[tuple[float, float, float, float]] = []
 
         for block in d.get("blocks", []):
             btype = block.get("type")
@@ -173,6 +236,59 @@ def _walk_pages(doc: fitz.Document, image_out_dir: Path) -> tuple[
                     width=width, height=height,
                 ))
                 image_index += 1
+                page_image_bboxes.append(bbox)
+
+        # --- Vector figures: rasterize clustered drawings as their own images.
+        for bbox in _detect_vector_regions(page):
+            # Skip regions that overlap heavily with an already-extracted raster
+            # image — avoid double-rendering.
+            x0, y0, x1, y1 = bbox
+            duplicate = any(
+                not (x1 < ib[0] or x0 > ib[2] or y1 < ib[1] or y0 > ib[3])
+                and (min(x1, ib[2]) - max(x0, ib[0])) * (min(y1, ib[3]) - max(y0, ib[1]))
+                > 0.5 * (x1 - x0) * (y1 - y0)
+                for ib in page_image_bboxes
+            )
+            if duplicate:
+                continue
+            pad = _VEC_PADDING
+            clip = fitz.Rect(
+                max(0, x0 - pad),
+                max(0, y0 - pad),
+                min(page.rect.width, x1 + pad),
+                min(page.rect.height, y1 + pad),
+            )
+            try:
+                pix = page.get_pixmap(
+                    clip=clip,
+                    matrix=fitz.Matrix(_VEC_RENDER_SCALE, _VEC_RENDER_SCALE),
+                    alpha=False,
+                )
+            except Exception:
+                continue
+            fname = f"{image_index}.png"
+            (image_out_dir / fname).write_bytes(pix.tobytes("png"))
+            images.append(_ImageHit(
+                page=page_num, y=clip.y0,
+                url_path=f"images/{fname}",
+                width=int(clip.width), height=int(clip.height),
+            ))
+            image_index += 1
+            page_image_bboxes.append((clip.x0, clip.y0, clip.x1, clip.y1))
+
+        # --- Drop text lines whose center falls inside any image bbox on this
+        # page. PyMuPDF often extracts garbled text from inside figures
+        # (especially math); now that we have the figure rasterized, we don't
+        # want that broken text mixed back in.
+        if page_image_bboxes:
+            def inside_any(L: _Line) -> bool:
+                cx = (L.x_start + L.x_end) / 2
+                cy = L.y
+                for ib in page_image_bboxes:
+                    if ib[0] <= cx <= ib[2] and ib[1] <= cy <= ib[3]:
+                        return True
+                return False
+            page_lines = [L for L in page_lines if not inside_any(L)]
 
         pages_lines.append(page_lines)
 
@@ -357,8 +473,21 @@ def _build_paragraphs(
     pages_lines: list[list[_Line]],
     running: set[str],
     toc_pages: set[int],
+    med_size: float,
 ) -> list[Paragraph]:
+    """Build paragraphs, forcing breaks around heading-sized lines.
+
+    A line whose font size is notably larger than the body's median is treated
+    as a heading: we cut the current paragraph before it and start a fresh one
+    after it. Without this, headings like "Chapter 13" get glued to the body
+    text that follows them on the same page.
+    """
+    HEADING_RATIO = 1.3
     out: list[Paragraph] = []
+
+    def is_heading(L: _Line) -> bool:
+        return med_size > 0 and L.h > med_size * HEADING_RATIO
+
     for idx, page in enumerate(pages_lines):
         if idx in toc_pages:
             continue
@@ -383,25 +512,32 @@ def _build_paragraphs(
         med_gap = statistics.median(gaps) if gaps else 0.0
         cur_text: list[str] = []
         cur_y: float | None = None
+
+        def flush(page_num: int):
+            nonlocal cur_text, cur_y
+            if cur_text:
+                text = _clean_text(_join_lines(cur_text))
+                if text:
+                    out.append(Paragraph(kind="text", text=text, page=page_num, y=cur_y or 0))
+                cur_text = []
+                cur_y = None
+
         for k, L in enumerate(kept):
+            heading_now = is_heading(L)
+            heading_prev = k > 0 and is_heading(kept[k - 1])
             new_para = False
             if k > 0:
                 gap = L.y - kept[k - 1].y
                 if med_gap > 0 and gap > med_gap * 1.6:
                     new_para = True
-            if new_para and cur_text:
-                text = _clean_text(_join_lines(cur_text))
-                if text:
-                    out.append(Paragraph(kind="text", text=text, page=kept[k - 1].page, y=cur_y or 0))
-                cur_text = []
-                cur_y = None
+                if heading_now or heading_prev:
+                    new_para = True
+            if new_para:
+                flush(kept[k - 1].page)
             if cur_y is None:
                 cur_y = L.y
             cur_text.append(L.text)
-        if cur_text:
-            text = _clean_text(_join_lines(cur_text))
-            if text:
-                out.append(Paragraph(kind="text", text=text, page=kept[-1].page, y=cur_y or 0))
+        flush(kept[-1].page)
     return out
 
 
@@ -414,8 +550,9 @@ def extract_elements(pdf_bytes: bytes, image_out_dir: Path) -> tuple[list[Elemen
     pages_lines, image_hits, all_sizes = _walk_pages(doc, image_out_dir)
     running = _running_lines(pages_lines)
     toc_pages = _toc_pages(pages_lines)
+    med_size = statistics.median(all_sizes) if all_sizes else 0.0
 
-    paragraphs = _build_paragraphs(pages_lines, running, toc_pages)
+    paragraphs = _build_paragraphs(pages_lines, running, toc_pages, med_size)
 
     # Interleave images with paragraphs in reading order, per page.
     elements: list[Element] = []
